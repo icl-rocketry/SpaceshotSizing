@@ -1,0 +1,128 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.sparse import coo_matrix
+from scipy.sparse.linalg import spsolve
+
+def lk():
+    """ Element stiffness matrix for a 2D truss element """
+    E = 1
+    nu = 0.3
+    k = np.array([[12,  3, -6, -3,  6, -3],
+                  [ 3, 12,  3,  0,  3,  0],
+                  [-6,  3, 12, -3,  0, -3],
+                  [-3,  0, -3, 12,  3,  0],
+                  [ 6,  3,  0,  3, 12, -3],
+                  [-3,  0, -3,  0, -3, 12]])
+    return k
+
+def create_mesh(nelx, nely):
+    """ Generate a mesh for the 2D problem """
+    nodenrs = np.reshape(np.arange((nelx + 1) * (nely + 1)), (nely + 1, nelx + 1))
+    edofMat = np.zeros((nelx * nely, 8), dtype=int)
+    for elx in range(nelx):
+        for ely in range(nely):
+            el = ely + elx * nely
+            n1 = nodenrs[ely, elx]
+            n2 = nodenrs[ely, elx + 1]
+            n3 = nodenrs[ely + 1, elx + 1]
+            n4 = nodenrs[ely + 1, elx]
+            edofMat[el, :] = np.array([2 * n1, 2 * n1 + 1, 2 * n2, 2 * n2 + 1,
+                                       2 * n3, 2 * n3 + 1, 2 * n4, 2 * n4 + 1])
+    return edofMat
+
+def define_loads_and_bc(nelx, nely):
+    """ Define loads and boundary conditions """
+    ndof = 2 * (nelx + 1) * (nely + 1)
+    F = np.zeros((ndof, 1))
+    U = np.zeros((ndof, 1))
+    
+    # Load (upwards force on the rightmost node)
+    F[2 * (nelx + 1) * (nely + 1) - 1, 0] = -1  # Adjusted to upwards force
+    
+    # Boundary conditions (fixed supports on the left side)
+    fixed_dofs = np.union1d(np.arange(0, 2 * (nely + 1), 2), np.arange(1, 2 * (nely + 1), 2))
+    
+    all_dofs = np.arange(ndof)
+    free_dofs = np.setdiff1d(all_dofs, fixed_dofs)
+    
+    return F, U, fixed_dofs, free_dofs
+
+def optimize(nelx, nely, volfrac, penal, rmin, max_iter):
+    """ Perform topology optimization using the SIMP method """
+    E0 = 1
+    Emin = 1e-9
+    edofMat = create_mesh(nelx, nely)
+    nele = nelx * nely
+    ndof = 2 * (nelx + 1) * (nely + 1)
+    KE = lk()
+    
+    # Initialize design variables
+    x = volfrac * np.ones(nelx * nely, dtype=float)
+    xold = x.copy()
+    dc = np.zeros(nelx * nely, dtype=float)
+    ce = np.ones(nelx * nely, dtype=float)
+    
+    # Define loads and boundary conditions
+    F, U, fixed_dofs, free_dofs = define_loads_and_bc(nelx, nely)
+    
+    for loop in range(max_iter):
+        # Setup and solve FE problem
+        sK = ((KE.flatten()[np.newaxis]).T * (Emin + x**penal * (E0 - Emin))).flatten()
+        iK = np.kron(edofMat, np.ones((8, 1))).flatten()
+        jK = np.kron(edofMat, np.ones((1, 8))).flatten()
+        K = coo_matrix((sK, (iK, jK)), shape=(ndof, ndof)).tocsc()
+        
+        # Apply boundary conditions
+        K = K[free_dofs, :][:, free_dofs]
+        U[free_dofs, 0] = spsolve(K, F[free_dofs, 0])
+        
+        # Objective function and sensitivity analysis
+        ce[:] = (np.dot(U[edofMat].reshape(nele, 8), KE) * U[edofMat].reshape(nele, 8)).sum(1)
+        c = ((Emin + x**penal * (E0 - Emin)) * ce).sum()
+        dc[:] = (-penal * x**(penal - 1) * (E0 - Emin)) * ce
+        
+        # Filtering
+        dc = np.asarray((np.dot(np.ones((nele, nele)), (x * dc).T) / np.dot(np.ones((nele, nele)), x.T)).T).flatten()
+        
+        # Design update by the optimality criteria method
+        l1 = 0
+        l2 = 1e9
+        move = 0.2
+        while (l2 - l1) / (l1 + l2) > 1e-3:
+            lmid = 0.5 * (l2 + l1)
+            xnew = np.maximum(0.001, np.maximum(x - move, np.minimum(1.0, np.minimum(x + move, x * np.sqrt(-dc / lmid)))))
+            if np.sum(xnew) - volfrac * nele > 0:
+                l1 = lmid
+            else:
+                l2 = lmid
+        
+        x = xnew
+        change = np.linalg.norm(x - xold, np.inf)
+        xold[:] = x
+        
+        # Print results
+        print(f"Iter: {loop}, Obj: {c:.4f}, Vol: {np.mean(x):.3f}, ch: {change:.4f}")
+        
+        if change < 0.01:
+            break
+    
+    # Plot the final design
+    plot_result(x, nelx, nely)
+    
+def plot_result(x, nelx, nely):
+    """ Plot the optimized design """
+    plt.imshow(-x.reshape((nelx, nely)).T, cmap='gray')
+    plt.colorbar()
+    plt.title('Optimized design')
+    plt.show()
+
+# Parameters
+nelx = 60  # Number of elements in x-direction
+nely = 20  # Number of elements in y-direction
+volfrac = 0.4  # Volume fraction
+penal = 3.0  # Penalty parameter
+rmin = 1.5  # Filter radius
+max_iter = 100  # Maximum number of iterations
+
+# Run optimization
+optimize(nelx, nely, volfrac, penal, rmin, max_iter)
