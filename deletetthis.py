@@ -1,5 +1,6 @@
 import numpy as np
 
+
 def solve_riccati(A, B, Q, R, tol=1e-9, max_iter=1000):
     """
     Solve the continuous-time algebraic Riccati equation (CARE) using an iterative approach.
